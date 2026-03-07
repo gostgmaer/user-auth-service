@@ -230,16 +230,20 @@ userSchema.index({ tenantId: 1, 'meta.department': 1 });
 userSchema.index({ tenantId: 1, 'meta.team': 1 });
 userSchema.index({ tenantId: 1, 'meta.tags': 1 });
 
-// ─── Pre-save: cap unbounded subdocument arrays ───────────────────────────────
-// Prevents the 16 MB MongoDB document limit from being hit by long-lived accounts
-// with many sessions/tokens. Keep only non-expired entries up to the hard caps.
+// ─── Pre-save: cap arrays + clear stale transient fields ─────────────────────
+// 1. Trims oversized subdoc arrays on every write (guards the 16 MB doc limit).
+// 2. Clears expired one-time tokens/OTPs so stale hashes don't accumulate.
+//    This is a best-effort, on-write cleanup; the background cron jobs handle
+//    documents that are never re-saved.
 userSchema.pre('save', function (next) {
   const now = new Date();
-  const MAX_SESSIONS      = 50;
-  const MAX_TOKENS        = 50;
-  const MAX_DEVICES       = 30;
-  const MAX_LOGIN_HISTORY = 100;
+  const MAX_SESSIONS        = 50;
+  const MAX_TOKENS          = 50;
+  const MAX_DEVICES         = 30;
+  const MAX_LOGIN_HISTORY   = 100;
+  const MAX_SECURITY_EVENTS = parseInt(process.env.MAX_SECURITY_EVENTS || '200', 10);
 
+  // ── Array caps ──────────────────────────────────────────────────────────────
   if (this.activeSessions && this.activeSessions.length > MAX_SESSIONS) {
     this.activeSessions = this.activeSessions
       .filter((s) => s.isActive && s.expiresAt > now)
@@ -260,6 +264,53 @@ userSchema.pre('save', function (next) {
 
   if (this.loginHistory && this.loginHistory.length > MAX_LOGIN_HISTORY) {
     this.loginHistory = this.loginHistory.slice(-MAX_LOGIN_HISTORY);
+  }
+
+  if (this.securityEvents && this.securityEvents.length > MAX_SECURITY_EVENTS) {
+    this.securityEvents = this.securityEvents.slice(-MAX_SECURITY_EVENTS);
+  }
+
+  // ── Stale transient field cleanup ───────────────────────────────────────────
+  // Email verification token
+  if (
+    this.emailVerificationTokenExpiry &&
+    this.emailVerificationTokenExpiry < now &&
+    this.emailVerificationToken
+  ) {
+    this.emailVerificationToken       = null;
+    this.emailVerificationTokenExpiry = null;
+  }
+
+  // Password reset token
+  if (
+    this.passwordReset?.tokenExpiry &&
+    this.passwordReset.tokenExpiry < now &&
+    this.passwordReset.token
+  ) {
+    this.passwordReset.token       = null;
+    this.passwordReset.tokenExpiry = null;
+    this.passwordReset.attempts    = 0;
+  }
+
+  // Account unlock token
+  if (
+    this.unlockToken?.tokenExpiry &&
+    this.unlockToken.tokenExpiry < now &&
+    this.unlockToken.token
+  ) {
+    this.unlockToken.token       = null;
+    this.unlockToken.tokenExpiry = null;
+  }
+
+  // Expired account lock — auto-unlock when the lock window has passed
+  if (this.loginSecurity?.lockedUntil && this.loginSecurity.lockedUntil < now) {
+    this.loginSecurity.lockedUntil    = null;
+    this.loginSecurity.failedAttempts = 0;
+  }
+
+  // Expired OTP — clear stale one-time password data
+  if (this.currentOTP?.expiresAt && this.currentOTP.expiresAt < now) {
+    this.currentOTP = {};
   }
 
   next();

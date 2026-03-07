@@ -528,7 +528,7 @@
                                                                                "verify"
                                                                            ]
                                                               },
-                                                      "description":  "Validate and decode a Bearer token. Used by other microservices to verify identity without owning the JWT secret.\n\n**200:** `{ valid: true, user: { id, tenantId, email, role } }`\n**401:** `{ valid: false, error: \u0027TOKEN_EXPIRED\u0027 }` or similar"
+                                                      "description":  "Validate a Bearer access token and return the live user state. Intended for service-to-service gateway calls.\n\nAlways returns HTTP 200 with `{ valid: true|false }` so API gateways get a consistent shape.\n\n**Success response:**\n```json\n{\n  \"valid\": true,\n  \"user\": {\n    \"id\": \"64a...\",\n    \"tenantId\": \"tenant-a\",\n    \"email\": \"alice@example.com\",\n    \"firstName\": \"Alice\",\n    \"lastName\": \"Smith\",\n    \"role\": \"admin\",\n    \"permissions\": [\"read:users\", \"manage:roles\"],\n    \"status\": \"active\",\n    \"isActive\": true,\n    \"emailVerified\": true,\n    \"isVerified\": true,\n    \"sessionId\": \"3f8...\"\n  }\n}\n```\n\n**Failure response (always HTTP 200 except TENANT_MISMATCH=403):**\n```json\n{ \"valid\": false, \"error\": \"TOKEN_EXPIRED\" }\n```\n\n**Error codes:**\n| Code | Meaning |\n|---|---|\n| `NO_TOKEN` | Authorization header missing |\n| `TOKEN_EXPIRED` | JWT exp claim passed |\n| `INVALID_TOKEN` | Signature / issuer / audience failure |\n| `TOKEN_REVOKED` | JTI is blacklisted |\n| `TENANT_MISMATCH` | Token tenant \u2260 request tenant (403) |\n| `USER_NOT_FOUND` | User deleted after token was issued |\n| `ACCOUNT_INACTIVE` | User suspended, banned, or deactivated |\n| `SESSION_INVALID` | Session was force-revoked or expired |\n\n**Rate limit:** 120 req/min per IP."
                                                   },
                                       "event":  [
                                                     {
@@ -536,13 +536,42 @@
                                                         "script":  {
                                                                        "type":  "text/javascript",
                                                                        "exec":  [
-                                                                                    "pm.test(\u0027Returns valid flag\u0027, () =\u003e {",
-                                                                                    "  const json = pm.response.json();",
+                                                                                    "const json = pm.response.json();",
+                                                                                    "",
+                                                                                    "pm.test(\u0027Response always contains valid flag\u0027, () =\u003e {",
                                                                                     "  pm.expect(json).to.have.property(\u0027valid\u0027);",
                                                                                     "});",
-                                                                                    "if (pm.response.code === 200) {",
-                                                                                    "  pm.test(\u0027User payload present\u0027, () =\u003e {",
-                                                                                    "    pm.expect(pm.response.json().user).to.have.all.keys(\u0027id\u0027, \u0027tenantId\u0027, \u0027email\u0027, \u0027role\u0027);",
+                                                                                    "",
+                                                                                    "if (json.valid === true) {",
+                                                                                    "  pm.test(\u0027Status 200 on valid token\u0027, () =\u003e pm.response.to.have.status(200));",
+                                                                                    "",
+                                                                                    "  pm.test(\u0027User object has required identity fields\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json.user).to.include.keys(\u0027id\u0027, \u0027tenantId\u0027, \u0027email\u0027, \u0027sessionId\u0027);",
+                                                                                    "  });",
+                                                                                    "",
+                                                                                    "  pm.test(\u0027Role is a non-empty string\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json.user.role).to.be.a(\u0027string\u0027).and.not.empty;",
+                                                                                    "  });",
+                                                                                    "",
+                                                                                    "  pm.test(\u0027Permissions is an array\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json.user.permissions).to.be.an(\u0027array\u0027);",
+                                                                                    "  });",
+                                                                                    "",
+                                                                                    "  pm.test(\u0027Account is active\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json.user.isActive).to.eql(true);",
+                                                                                    "    pm.expect(json.user.status).to.eql(\u0027active\u0027);",
+                                                                                    "  });",
+                                                                                    "",
+                                                                                    "  pm.test(\u0027tenantId matches collection variable\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json.user.tenantId).to.eql(pm.collectionVariables.get(\u0027tenantId\u0027));",
+                                                                                    "  });",
+                                                                                    "",
+                                                                                    "} else {",
+                                                                                    "  pm.test(\u0027Error code is present on invalid token\u0027, () =\u003e {",
+                                                                                    "    pm.expect(json).to.have.property(\u0027error\u0027);",
+                                                                                    "    pm.expect([\u0027TOKEN_EXPIRED\u0027, \u0027TOKEN_REVOKED\u0027, \u0027INVALID_TOKEN\u0027, \u0027TENANT_MISMATCH\u0027,",
+                                                                                    "              \u0027USER_NOT_FOUND\u0027, \u0027ACCOUNT_INACTIVE\u0027, \u0027SESSION_INVALID\u0027, \u0027NO_TOKEN\u0027])",
+                                                                                    "      .to.include(json.error);",
                                                                                     "  });",
                                                                                     "}"
                                                                                 ]

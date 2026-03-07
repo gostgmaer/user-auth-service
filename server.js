@@ -5,8 +5,9 @@
 require('./src/config/validateEnv');
 
 const { connectDB, disconnectDB } = require('./src/config/db');
-const logger = require('./src/utils/logger');
-const app    = require('./app');
+const logger         = require('./src/utils/logger');
+const app            = require('./app');
+const cleanupManager = require('./src/jobs/cleanupManager');
 
 const PORT = parseInt(process.env.PORT || '4002', 10);
 
@@ -22,6 +23,9 @@ const start = async () => {
         pid:  process.pid,
       });
     });
+
+    // Start background cleanup jobs after the DB is confirmed ready
+    cleanupManager.startAll();
 
     // Prevent premature socket closure behind load balancers (AWS ALB / nginx keep-alive = 60 s).
     // headersTimeout must be strictly greater than keepAliveTimeout.
@@ -51,6 +55,7 @@ const shutdown = async (signal) => {
       });
       logger.info('HTTP server closed');
     }
+    cleanupManager.stopAll();
     await disconnectDB();
     logger.info('MongoDB disconnected');
     clearTimeout(forceExit);
