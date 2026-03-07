@@ -19,3 +19,8 @@ dist/
 build/
 tmp/
 temp/
+logs/
+CLEANUP_PLAN.md
+IMPLEMENTATION.md
+postman/
+*.md

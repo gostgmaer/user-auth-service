@@ -7,12 +7,16 @@ const cors             = require('cors');
 const cookieParser     = require('cookie-parser');
 const mongoSanitize    = require('express-mongo-sanitize');
 const morgan           = require('morgan');
+const hpp              = require('hpp');
 
 const compression      = require('./src/middleware/compression.middleware');
 const { sanitizeInput } = require('./src/middleware/sanitization');
 const { loggerMiddleware } = require('./src/middleware/loggerMiddleware');
 const { tenantMiddleware } = require('./src/middleware/tenant');
 const { errorHandler }     = require('./src/middleware/errorHandler');
+const requestTimeout   = require('./src/middleware/requestTimeout');
+const { globalApiLimiter } = require('./src/middleware/rateLimit');
+const { metricsMiddleware } = require('./src/utils/metrics');
 const logger           = require('./src/utils/logger');
 
 const healthRoutes      = require('./src/routes/healthRoutes');
@@ -27,8 +31,22 @@ app.set('trust proxy', parseInt(process.env.TRUST_PROXY || '1', 10));
 
 // ─── Security headers ─────────────────────────────────────────────────────────
 app.use(helmet({
-  contentSecurityPolicy: false, // managed by API gateway
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  // Content-Security-Policy: restrict sources; API-gateway may override
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:     ["'none'"],
+      scriptSrc:      ["'none'"],
+      objectSrc:      ["'none'"],
+      frameAncestors: ["'none'"],
+    },
+  },
+  crossOriginResourcePolicy:   { policy: 'cross-origin' },
+  crossOriginOpenerPolicy:     { policy: 'same-origin' },
+  originAgentCluster:          true,
+  strictTransportSecurity:     { maxAge: 63072000, includeSubDomains: true, preload: true },
+  referrerPolicy:              { policy: 'strict-origin-when-cross-origin' },
+  xContentTypeOptions:         true,
+  xFrameOptions:               { action: 'deny' },
 }));
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -52,6 +70,11 @@ app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
 app.use(cookieParser());
 
+// ─── HTTP Parameter Pollution protection ─────────────────────────────────────
+// Strips duplicate query params (e.g. ?role=admin&role=super_admin) to the last value.
+// Whitelist fields that legitimately accept arrays.
+app.use(hpp({ whitelist: ['sort', 'fields', 'ids'] }));
+
 // ─── Sanitization ─────────────────────────────────────────────────────────────
 app.use(mongoSanitize({ replaceWith: '_' }));
 app.use(sanitizeInput);
@@ -61,6 +84,12 @@ app.use((req, _res, next) => {
   req.requestId = req.headers['x-request-id'] || require('crypto').randomUUID();
   next();
 });
+
+// ─── Per-request timeout (30 s hard limit) ────────────────────────────────────
+app.use(requestTimeout(30_000));
+
+// ─── Prometheus metrics instrumentation ──────────────────────────────────────
+app.use(metricsMiddleware);
 
 // ─── HTTP logging ─────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
@@ -73,6 +102,9 @@ if (process.env.NODE_ENV !== 'test') {
 
 // ─── Health (no tenant required) ─────────────────────────────────────────────
 app.use('/health', healthRoutes);
+
+// ─── Global API rate limiter (coarse backstop before tenant resolution) ───────
+app.use('/api', globalApiLimiter);
 
 // ─── Tenant extraction (required for all /api routes) ────────────────────────
 // NOTE: tenant middleware is applied here so Routes don't need to include it

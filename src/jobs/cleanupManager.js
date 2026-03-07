@@ -12,12 +12,13 @@
 'use strict';
 
 const logger = require('../utils/logger');
+const env    = require('../config/env');
 
 const expiredSessionCleaner = require('./expiredSessionCleaner');
 const staleUserFieldCleaner = require('./staleUserFieldCleaner');
 const securityEventsTrimmer = require('./securityEventsTrimmer');
 
-const ENABLED = process.env.CLEANUP_ENABLED !== 'false';
+const ENABLED = env.CLEANUP_ENABLED;
 
 const MINUTE = 60 * 1000;
 const HOUR   = 60 * MINUTE;

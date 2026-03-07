@@ -1,6 +1,12 @@
 version: '3.9'
 
+# ─── Shared network (isolated from other stacks) ─────────────────────────────
+networks:
+  auth-net:
+    driver: bridge
+
 services:
+  # ─── App — two replicas for HA (requires docker swarm/compose v2 for scale) ─
   user-auth-service:
     build:
       context: .
@@ -10,6 +16,8 @@ services:
     restart: unless-stopped
     ports:
       - '4002:4002'
+    networks:
+      - auth-net
     environment:
       NODE_ENV: production
       PORT: 4002
@@ -18,13 +26,14 @@ services:
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
       JWT_ID_SECRET: ${JWT_ID_SECRET}
-      JWT_ACCESS_EXPIRY: ${JWT_ACCESS_EXPIRY:-1d}
+      JWT_ACCESS_EXPIRY: ${JWT_ACCESS_EXPIRY:-15m}
       JWT_REFRESH_EXPIRY: ${JWT_REFRESH_EXPIRY:-7d}
       JWT_ID_EXPIRY: ${JWT_ID_EXPIRY:-30d}
       JWT_ISSUER: ${JWT_ISSUER:-user-auth-service}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-dashboard-app}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       TOKEN_REVOCATION_STORE: ${TOKEN_REVOCATION_STORE:-redis}
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
       EMAIL_SERVICE_URL: ${EMAIL_SERVICE_URL}
       EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@yourapp.com}
       EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-YourApp}
@@ -34,6 +43,11 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN}
       FRONTEND_URL: ${FRONTEND_URL}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      LOG_TO_FILE: ${LOG_TO_FILE:-false}
+      CLEANUP_ENABLED: 'true'
+      METRICS_SECRET: ${METRICS_SECRET}
+      TRUST_PROXY: 1
     depends_on:
       mongo:
         condition: service_healthy
@@ -50,11 +64,29 @@ services:
         limits:
           cpus: '1.0'
           memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: false        # app writes to logs/ dir inside container
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
 
   mongo:
     image: mongo:7
     container_name: user-auth-mongo
     restart: unless-stopped
+    networks:
+      - auth-net
+    # MongoDB access is restricted to the auth-net network only (no port exposed to host in prod)
+    # Uncomment below ONLY for local dev:
+    # ports:
+    #   - '27017:27017'
+    command:
+      - --wiredTigerCacheSizeGB=0.25
+      - --quiet
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -67,16 +99,32 @@ services:
       resources:
         limits:
           memory: 512M
+    security_opt:
+      - no-new-privileges:true
 
   redis:
     image: redis:7-alpine
     container_name: user-auth-redis
     restart: unless-stopped
-    command: ['redis-server', '--maxmemory', '128mb', '--maxmemory-policy', 'allkeys-lru', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    networks:
+      - auth-net
+    # Uncomment below ONLY for local dev:
+    # ports:
+    #   - '6379:6379'
+    command:
+      - redis-server
+      - --maxmemory 128mb
+      - --maxmemory-policy allkeys-lru
+      - --appendonly yes
+      - --appendfsync everysec
+      - --requirepass ${REDIS_PASSWORD:-changeme}
+      - --loglevel warning
+      - --save 900 1
+      - --save 300 10
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD:-changeme}', 'ping']
       interval: 10s
       timeout: 3s
       retries: 5
@@ -84,7 +132,10 @@ services:
       resources:
         limits:
           memory: 128M
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   mongo_data:
   redis_data:
+

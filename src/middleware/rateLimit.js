@@ -4,8 +4,10 @@ const { RedisStore }        = require('rate-limit-redis');
 const AppError              = require('../utils/appError');
 const env                   = require('../config/env');
 const { getRedisClient }    = require('../config/redis');
+const { recordRateLimit }   = require('../utils/metrics');
 
-const makeHandler = (message) => (req, res) => {
+const makeHandler = (message, limiterName) => (req, res) => {
+  recordRateLimit(limiterName);
   res.status(429).json({
     success: false,
     statusCode: 429,
@@ -34,7 +36,7 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many login attempts. Please try again in 15 minutes.'),
+  handler: makeHandler('Too many login attempts. Please try again in 15 minutes.', 'login'),
   store: makeStore('login'),
 });
 
@@ -44,7 +46,7 @@ const registerLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many registration attempts. Please try again later.'),
+  handler: makeHandler('Too many registration attempts. Please try again later.', 'register'),
   store: makeStore('register'),
 });
 
@@ -54,7 +56,7 @@ const otpLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many OTP requests. Please try again later.'),
+  handler: makeHandler('Too many OTP requests. Please try again later.', 'otp'),
   store: makeStore('otp'),
 });
 
@@ -64,7 +66,7 @@ const resetLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many password reset requests. Please try again later.'),
+  handler: makeHandler('Too many password reset requests. Please try again later.', 'reset'),
   store: makeStore('reset'),
 });
 
@@ -76,7 +78,7 @@ const verifyLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many token verification requests.'),
+  handler: makeHandler('Too many token verification requests.', 'verify'),
   store: makeStore('verify'),
 });
 
@@ -88,8 +90,23 @@ const refreshLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
   keyGenerator: (req) => `${req.ip}:${req.tenantId || 'noTenant'}`,
-  handler: makeHandler('Too many token refresh requests. Please try again later.'),
+  handler: makeHandler('Too many token refresh requests. Please try again later.', 'refresh'),
   store: makeStore('refresh'),
 });
 
-module.exports = { loginLimiter, registerLimiter, otpLimiter, resetLimiter, verifyLimiter, refreshLimiter };
+// ─── Global API limiter ───────────────────────────────────────────────────────
+// Coarse backstop that protects every /api/* route from volumetric DoS.
+// Fine-grained per-endpoint limiters above handle targeted abuse.
+const globalApiLimiter = rateLimit({
+  windowMs: 60 * 1000,         // 1 minute window
+  max:      300,               // 300 requests/min per IP across ALL /api routes
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator: (req) => req.ip,
+  handler: makeHandler('API rate limit exceeded. Please slow down.', 'global'),
+  store: makeStore('global'),
+  // Skip health checks — they're not under /api but guard against misconfiguration
+  skip: (req) => req.path === '/health' || req.path === '/health/live',
+});
+
+module.exports = { loginLimiter, registerLimiter, otpLimiter, resetLimiter, verifyLimiter, refreshLimiter, globalApiLimiter };

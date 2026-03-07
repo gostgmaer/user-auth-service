@@ -5,6 +5,7 @@
 require('./src/config/validateEnv');
 
 const { connectDB, disconnectDB } = require('./src/config/db');
+const { disconnectRedis }         = require('./src/config/redis');
 const logger         = require('./src/utils/logger');
 const app            = require('./app');
 const cleanupManager = require('./src/jobs/cleanupManager');
@@ -18,9 +19,10 @@ const start = async () => {
     await connectDB();
     server = app.listen(PORT, () => {
       logger.info(`user-auth-service started`, {
-        port: PORT,
-        env:  process.env.NODE_ENV || 'development',
-        pid:  process.pid,
+        port:      PORT,
+        env:       process.env.NODE_ENV || 'development',
+        pid:       process.pid,
+        workerId:  process.env.pm_id || 0,
       });
     });
 
@@ -58,6 +60,7 @@ const shutdown = async (signal) => {
     cleanupManager.stopAll();
     await disconnectDB();
     logger.info('MongoDB disconnected');
+    await disconnectRedis();
     clearTimeout(forceExit);
     process.exit(0);
   } catch (err) {
