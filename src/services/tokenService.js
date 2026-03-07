@@ -1,18 +1,51 @@
 // src/services/tokenService.js
+'use strict';
+
 const jwt  = require('jsonwebtoken');
+const fs   = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const jwtConfig = require('../config/jwt');
 const { hashToken } = require('../utils/security');
 const env       = require('../config/env');
 
+// ─── Asymmetric key loading ───────────────────────────────────────────────────
+// When JWT_ALGORITHM is RS*/ES*, load PEM keys from the paths specified in env.
+// Falls back to symmetric HMAC secrets for HS* algorithms.
+const _isAsymmetric = /^(RS|ES|PS)\d+$/.test(jwtConfig.algorithm);
+
+const _loadKey = (pathEnv, fallback) => {
+  if (!_isAsymmetric) return fallback;
+  if (!pathEnv) return fallback;
+  try {
+    return fs.readFileSync(pathEnv);
+  } catch (err) {
+    const logger = require('../utils/logger');
+    logger.warn(`JWT key file not found at ${pathEnv}, falling back to secret`, { error: err.message });
+    return fallback;
+  }
+};
+
+// Only load from disk once at module initialisation — not per-request
+const signingKey   = _loadKey(jwtConfig.privateKeyPath, jwtConfig.accessSecret);
+const verifyingKey = _loadKey(jwtConfig.publicKeyPath,  jwtConfig.accessSecret);
+
 /**
  * Build JWT sign options with standard claims.
  */
-const buildOptions = (secret, expiry) => ({
+const buildOptions = (_secret, expiry) => ({
   algorithm: jwtConfig.algorithm,
   expiresIn: expiry,
   issuer:    jwtConfig.issuer,
   audience:  jwtConfig.audience,
+});
+
+/**
+ * Build JWT verify options (uses public key for asymmetric, shared secret for HMAC).
+ */
+const buildVerifyOptions = () => ({
+  algorithms: [jwtConfig.algorithm],
+  issuer:     jwtConfig.issuer,
+  audience:   jwtConfig.audience,
 });
 
 /**
@@ -32,16 +65,18 @@ const generateTokens = (user, sessionId) => {
     sessionId,
   };
 
+  // For asymmetric algorithms (RS256/RS384/RS512) use the private key for signing;
+  // for symmetric (HS256/HS384/HS512) fall back to the dedicated per-token secrets.
   const accessToken = jwt.sign(
     { ...baseClaims, jti: accessJti },
-    jwtConfig.accessSecret,
-    buildOptions(jwtConfig.accessSecret, jwtConfig.accessExpiry)
+    _isAsymmetric ? signingKey : jwtConfig.accessSecret,
+    buildOptions(null, jwtConfig.accessExpiry)
   );
 
   const refreshToken = jwt.sign(
     { sub: user._id.toString(), tenantId: user.tenantId, jti: refreshJti, sessionId },
-    jwtConfig.refreshSecret,
-    buildOptions(jwtConfig.refreshSecret, jwtConfig.refreshExpiry)
+    _isAsymmetric ? signingKey : jwtConfig.refreshSecret,
+    buildOptions(null, jwtConfig.refreshExpiry)
   );
 
   const idToken = jwt.sign(
@@ -58,8 +93,8 @@ const generateTokens = (user, sessionId) => {
       role:      user.role?.name || null,
       emailVerified: user.emailVerified,
     },
-    jwtConfig.idSecret,
-    buildOptions(jwtConfig.idSecret, jwtConfig.idExpiry)
+    _isAsymmetric ? signingKey : jwtConfig.idSecret,
+    buildOptions(null, jwtConfig.idExpiry)
   );
 
   return {
@@ -70,24 +105,17 @@ const generateTokens = (user, sessionId) => {
 };
 
 /**
- * Verify an access token and return decoded payload, or throw.
+ * Verify an access (or id) token and return decoded payload, or throw.
+ * Uses the public key for asymmetric algorithms, shared secret for HMAC.
  */
 const verifyAccessToken = (token) =>
-  jwt.verify(token, jwtConfig.accessSecret, {
-    algorithms: [jwtConfig.algorithm],
-    issuer:     jwtConfig.issuer,
-    audience:   jwtConfig.audience,
-  });
+  jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.accessSecret, buildVerifyOptions());
 
 /**
  * Verify a refresh token and return decoded payload, or throw.
  */
 const verifyRefreshToken = (token) =>
-  jwt.verify(token, jwtConfig.refreshSecret, {
-    algorithms: [jwtConfig.algorithm],
-    issuer:     jwtConfig.issuer,
-    audience:   jwtConfig.audience,
-  });
+  jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.refreshSecret, buildVerifyOptions());
 
 /**
  * Set accessToken (header), refreshToken, and idToken as HttpOnly Secure cookies.

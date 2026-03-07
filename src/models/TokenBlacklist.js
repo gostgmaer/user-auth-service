@@ -5,7 +5,8 @@ const TokenBlacklistSchema = new mongoose.Schema(
   {
     jti:      { type: String, required: true, index: true },
     tenantId: { type: String, required: true, index: true },
-    userId:   { type: String, required: true },
+    // userId may be null for Redis-fallback writes (redis failure path passes null)
+    userId:   { type: String, default: null },
     reason:   {
       type: String,
       enum: ['logout', 'password_change', 'revoked_all', 'suspicious'],

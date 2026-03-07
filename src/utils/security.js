@@ -1,6 +1,6 @@
 // src/utils/security.js
 const crypto = require('crypto');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const env = require('../config/env');
 
 const BCRYPT_ROUNDS = env.BCRYPT_ROUNDS;

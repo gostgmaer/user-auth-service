@@ -6,6 +6,30 @@ const env    = require('./env');
 const TENANCY_MODE = env.TENANCY_MODE;
 const connections = new Map();
 
+// ─── Mongoose global settings ─────────────────────────────────────────────────
+// In production, disable auto-index creation — indexes should be pre-created via migrations.
+// bufferCommands: false makes commands fail immediately if the connection is down
+// instead of queuing indefinitely (prevents memory leaks under heavy load).
+mongoose.set('autoIndex',    !env.IS_PROD);
+mongoose.set('bufferCommands', false);
+
+// ─── Connection options (shared across all connections) ───────────────────────
+const CONNECTION_OPTIONS = {
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS:          45000,
+  connectTimeoutMS:         10000,
+  maxPoolSize:              env.IS_PROD ? 50 : 20,  // Higher pool in production clusters
+  minPoolSize:              env.IS_PROD ? 5  : 2,
+  waitQueueTimeoutMS:       10000,
+  heartbeatFrequencyMS:     10000,
+  // Write concern: majority ensures the write is acknowledged by the replica set primary + majority of secondaries
+  writeConcern: {
+    w: env.IS_PROD ? 'majority' : 1,
+    j: true,               // journaled writes only
+    wtimeoutMS: 5000,
+  },
+};
+
 // ─── Shared mode ──────────────────────────────────────────────────────────────
 const connectDB = async () => {
   const uri = env.MONGO_URI;
@@ -14,14 +38,21 @@ const connectDB = async () => {
 
   while (attempt < maxRetries) {
     try {
-      await mongoose.connect(uri, {
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS:          45000,
-        connectTimeoutMS:         10000,
-        maxPoolSize:              20,
-        minPoolSize:              2,
+      await mongoose.connect(uri, CONNECTION_OPTIONS);
+
+      // ── Connection event monitoring ─────────────────────────────────────────
+      mongoose.connection.on('disconnected', () =>
+        logger.warn('MongoDB disconnected — driver will attempt reconnect'));
+      mongoose.connection.on('reconnected', () =>
+        logger.info('MongoDB reconnected'));
+      mongoose.connection.on('error', (err) =>
+        logger.error('MongoDB connection error', { error: err.message }));
+
+      logger.info('MongoDB connected (shared mode)', {
+        host: mongoose.connection.host,
+        port: mongoose.connection.port,
+        name: mongoose.connection.name,
       });
-      logger.info('MongoDB connected (shared mode)');
       return;
     } catch (err) {
       attempt++;

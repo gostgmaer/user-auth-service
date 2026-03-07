@@ -74,6 +74,14 @@ const env = {
   // ─── Logging ──────────────────────────────────────────────────────────────
   LOG_LEVEL:  e.LOG_LEVEL,
   LOG_FORMAT: e.LOG_FORMAT,
+  LOG_TO_FILE: e.LOG_TO_FILE,
+  LOG_DIR:    e.LOG_DIR,
+
+  // ─── Observability ────────────────────────────────────────────────────────
+  METRICS_SECRET: e.METRICS_SECRET || '',
+
+  // ─── Background jobs ──────────────────────────────────────────────────────
+  CLEANUP_ENABLED: e.CLEANUP_ENABLED !== 'false',
 };
 
 module.exports = env;
