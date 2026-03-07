@@ -54,6 +54,10 @@ const logEntrySchema = new mongoose.Schema(
       enum: ['30d', '90d', '1y', 'forever'],
       default: '1y',
     },
+    // Computed from retentionPolicy in pre-save hook.
+    // MongoDB TTL index uses this field to auto-delete documents.
+    // Null means the document lives forever (MongoDB skips null in TTL scans).
+    expiresAt: { type: Date, default: null },
     isDeleted: { type: Boolean, default: false },
   },
   {
@@ -63,9 +67,31 @@ const logEntrySchema = new mongoose.Schema(
   }
 );
 
+// ─── TTL Index ────────────────────────────────────────────────────────────────
+// MongoDB auto-deletes documents once expiresAt is in the past.
+// expireAfterSeconds: 0 means delete exactly at expiresAt.
+// Documents with expiresAt: null are skipped — they live forever.
+logEntrySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 logEntrySchema.index({ tenantId: 1, userId: 1, createdAt: -1 });
 logEntrySchema.index({ tenantId: 1, action: 1, createdAt: -1 });
 logEntrySchema.index({ tenantId: 1, createdAt: -1 });
+
+// ─── Pre-save: compute expiresAt from retentionPolicy ─────────────────────────
+const RETENTION_MS = {
+  '30d': 30  * 24 * 60 * 60 * 1000,
+  '90d': 90  * 24 * 60 * 60 * 1000,
+  '1y':  365 * 24 * 60 * 60 * 1000,
+};
+
+logEntrySchema.pre('save', function (next) {
+  // Only compute once; if retentionPolicy changes later, recalculate.
+  if (!this.expiresAt && this.retentionPolicy !== 'forever') {
+    const ms = RETENTION_MS[this.retentionPolicy];
+    if (ms) this.expiresAt = new Date(Date.now() + ms);
+  }
+  next();
+});
 
 logEntrySchema.methods.getSummary = function () {
   return `[${this.createdAt.toISOString()}] ${this.role.toUpperCase()} (${this.userId || 'SYSTEM'}) performed ${this.action} on ${this.entity || 'N/A'}`;

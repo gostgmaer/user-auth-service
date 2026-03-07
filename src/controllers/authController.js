@@ -334,7 +334,11 @@ exports.refreshToken = async (req, res, next) => {
   return sendSuccess(res, 'Token refreshed', { accessToken });
 };
 
-// ─── Verify Token (used by other services) ───────────────────────────────────
+// ─── Verify Token (used by other microservices) ───────────────────────────────
+// Returns 200 { valid: true|false } always so gateway services get a consistent
+// shape.  On success the full live user record is returned (not just JWT claims),
+// guaranteeing downstream services see the current role and permissions even
+// when the token was issued before a role change.
 
 exports.verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -345,9 +349,10 @@ exports.verifyToken = async (req, res, next) => {
 
   try {
     const decoded = verifyAccessToken(token);
+    const tenantId = req.tenantId || decoded.tenantId;
 
     // Revocation check
-    const revoked = await isTokenRevoked(decoded.jti, req.tenantId || decoded.tenantId);
+    const revoked = await isTokenRevoked(decoded.jti, tenantId);
     if (revoked) return res.status(401).json({ valid: false, error: 'TOKEN_REVOKED' });
 
     // Cross-tenant check
@@ -355,14 +360,40 @@ exports.verifyToken = async (req, res, next) => {
       return res.status(403).json({ valid: false, error: 'TENANT_MISMATCH' });
     }
 
+    // Fetch live user with populated role and permissions
+    const user = await User.findOne(
+      { _id: decoded.sub, tenantId, isDeleted: false },
+      'firstName lastName email status isActive emailVerified isVerified role activeSessions'
+    ).populate({ path: 'role', select: 'name permissions', populate: { path: 'permissions', select: 'key' } });
+
+    if (!user) return res.status(401).json({ valid: false, error: 'USER_NOT_FOUND' });
+    if (!user.isActive || user.status !== 'active') {
+      return res.status(401).json({ valid: false, error: 'ACCOUNT_INACTIVE' });
+    }
+
+    // Verify the session referenced in the token is still active
+    const sessionActive = user.activeSessions.some(
+      (s) => s.sessionId === decoded.sessionId && s.isActive && s.expiresAt > new Date()
+    );
+    if (!sessionActive) return res.status(401).json({ valid: false, error: 'SESSION_INVALID' });
+
+    const permissions = (user.role?.permissions || []).map((p) => p.key).filter(Boolean);
+
     return res.status(200).json({
       valid: true,
       user: {
-        id:       decoded.sub,
-        tenantId: decoded.tenantId,
-        email:    decoded.email,
-        role:     decoded.role,
-        sessionId: decoded.sessionId,
+        id:           decoded.sub,
+        tenantId,
+        email:        user.email,
+        firstName:    user.firstName,
+        lastName:     user.lastName,
+        role:         user.role?.name || decoded.role || null,
+        permissions,
+        status:       user.status,
+        isActive:     user.isActive,
+        emailVerified: user.emailVerified,
+        isVerified:   user.isVerified,
+        sessionId:    decoded.sessionId,
       },
     });
   } catch (err) {
