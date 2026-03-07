@@ -1,0 +1,90 @@
+version: '3.9'
+
+services:
+  user-auth-service:
+    build:
+      context: .
+      target: production
+    image: user-auth-service:latest
+    container_name: user-auth-service
+    restart: unless-stopped
+    ports:
+      - '4002:4002'
+    environment:
+      NODE_ENV: production
+      PORT: 4002
+      MONGO_URI: mongodb://mongo:27017/user_auth_service
+      TENANCY_MODE: shared
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ID_SECRET: ${JWT_ID_SECRET}
+      JWT_ACCESS_EXPIRY: ${JWT_ACCESS_EXPIRY:-1d}
+      JWT_REFRESH_EXPIRY: ${JWT_REFRESH_EXPIRY:-7d}
+      JWT_ID_EXPIRY: ${JWT_ID_EXPIRY:-30d}
+      JWT_ISSUER: ${JWT_ISSUER:-user-auth-service}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-dashboard-app}
+      TOKEN_REVOCATION_STORE: ${TOKEN_REVOCATION_STORE:-redis}
+      REDIS_URL: redis://redis:6379
+      EMAIL_SERVICE_URL: ${EMAIL_SERVICE_URL}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@yourapp.com}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-YourApp}
+      TOTP_ISSUER: ${TOTP_ISSUER:-YourApp}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      MAX_LOGIN_ATTEMPTS: ${MAX_LOGIN_ATTEMPTS:-5}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      FRONTEND_URL: ${FRONTEND_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:4002/health/live']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  mongo:
+    image: mongo:7
+    container_name: user-auth-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    container_name: user-auth-redis
+    restart: unless-stopped
+    command: ['redis-server', '--maxmemory', '128mb', '--maxmemory-policy', 'allkeys-lru', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  mongo_data:
+  redis_data:
