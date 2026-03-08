@@ -57,19 +57,67 @@ const maskPhone = (phone) => {
 
 /**
  * Strip sensitive fields from a user object before returning it to clients.
+ * Also reduces a populated `role` object to just its name string.
+ * The `_id` → `id` renaming is handled centrally by serialize() in responseHelper.
+ *
+ * Removed fields:
+ *  - hash_password              — bcrypt hash
+ *  - emailVerificationToken     — raw/hashed token
+ *  - emailVerificationTokenExpiry
+ *  - passwordReset              — hashed reset token + metadata
+ *  - unlockToken                — hashed unlock token
+ *  - loginSecurity              — internal lockout counters
+ *  - refreshTokens              — hashed JTIs
+ *  - currentOTP                 — live OTP code/hash
+ *  - twoFactorAuth              — TOTP secret + backup codes
+ *  - activeSessions             — session IPs / user-agents (internal)
+ *  - loginHistory               — IP / device history (internal)
+ *  - securityEvents             — internal security audit log
+ *  - knownDevices               — device fingerprints / IPs
+ *  - __v                        — Mongoose version key
  */
 const sanitizeUser = (user) => {
   const obj = user.toObject ? user.toObject() : { ...user };
+
+  // Normalize role — reduce populated role object to just the name string
+  if (obj.role && typeof obj.role === 'object' && obj.role.name !== undefined) {
+    obj.role = obj.role.name;
+  }
+
+  // Credentials & tokens
   delete obj.hash_password;
+  delete obj.emailVerificationToken;
+  delete obj.emailVerificationTokenExpiry;
   delete obj.passwordReset;
-  delete obj.emailVerificationTokens;
+  delete obj.unlockToken;
+
+  // Internal security state
+  delete obj.loginSecurity;
   delete obj.refreshTokens;
-  delete obj.authTokens;
-  delete obj.twoFactorAuth;
   delete obj.currentOTP;
+  delete obj.twoFactorAuth;
+
+  // Internal history / session tracking
+  delete obj.activeSessions;
+  delete obj.loginHistory;
   delete obj.securityEvents;
+  delete obj.knownDevices;
+
   delete obj.__v;
+  // Soft-delete tombstone + actor audit — never expose from auth responses
+  delete obj.isDeleted;
+  delete obj.deletedAt;
+  delete obj.createdBy;
+  delete obj.updatedBy;
+  delete obj.deletedBy;
+  // _id → id renaming is handled by serialize() in responseHelper
   return obj;
 };
 
-module.exports = { decodeToken, buildPaginationOptions, safeJsonParse, maskEmail, maskPhone, sanitizeUser };
+/**
+ * Convert a Mongoose subdocument to a plain object.
+ * _id → id renaming is handled by serialize() in responseHelper.
+ */
+const stripId = (doc) => (doc.toObject ? doc.toObject() : { ...doc });
+
+module.exports = { decodeToken, buildPaginationOptions, safeJsonParse, maskEmail, maskPhone, sanitizeUser, stripId };

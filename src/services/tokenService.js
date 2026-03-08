@@ -29,6 +29,34 @@ const _loadKey = (pathEnv, fallback) => {
 const signingKey   = _loadKey(jwtConfig.privateKeyPath, jwtConfig.accessSecret);
 const verifyingKey = _loadKey(jwtConfig.publicKeyPath,  jwtConfig.accessSecret);
 
+// ─── Startup secret guard ─────────────────────────────────────────────────────
+// Fail immediately at service startup — never let the service run with weak or
+// missing secrets. This prevents silent failures from jwt.sign accepting empty strings.
+;(() => {
+  if (!_isAsymmetric) {
+    const required = [
+      ['JWT_ACCESS_SECRET',  jwtConfig.accessSecret],
+      ['JWT_REFRESH_SECRET', jwtConfig.refreshSecret],
+      ['JWT_ID_SECRET',      jwtConfig.idSecret],
+    ];
+    for (const [name, value] of required) {
+      if (!value || typeof value !== 'string' || value.trim().length < 32) {
+        throw new Error(`[tokenService] ${name} is missing or too short (min 32 chars). Refusing to start.`);
+      }
+    }
+    if (jwtConfig.accessSecret === jwtConfig.refreshSecret) {
+      throw new Error('[tokenService] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different. Using the same secret for both token types breaks token-type isolation.');
+    }
+    if (jwtConfig.accessSecret === jwtConfig.idSecret || jwtConfig.refreshSecret === jwtConfig.idSecret) {
+      throw new Error('[tokenService] JWT_ID_SECRET must be different from JWT_ACCESS_SECRET and JWT_REFRESH_SECRET.');
+    }
+  } else {
+    if (!signingKey || !verifyingKey) {
+      throw new Error('[tokenService] Asymmetric JWT keys (private/public) are missing or failed to load. Refusing to start.');
+    }
+  }
+})();
+
 /**
  * Build JWT sign options with standard claims.
  */
@@ -68,13 +96,13 @@ const generateTokens = (user, sessionId) => {
   // For asymmetric algorithms (RS256/RS384/RS512) use the private key for signing;
   // for symmetric (HS256/HS384/HS512) fall back to the dedicated per-token secrets.
   const accessToken = jwt.sign(
-    { ...baseClaims, jti: accessJti },
+    { ...baseClaims, jti: accessJti, token_type: 'access' },
     _isAsymmetric ? signingKey : jwtConfig.accessSecret,
     buildOptions(null, jwtConfig.accessExpiry)
   );
 
   const refreshToken = jwt.sign(
-    { sub: user._id.toString(), tenantId: user.tenantId, jti: refreshJti, sessionId },
+    { sub: user._id.toString(), tenantId: user.tenantId, jti: refreshJti, sessionId, token_type: 'refresh' },
     _isAsymmetric ? signingKey : jwtConfig.refreshSecret,
     buildOptions(null, jwtConfig.refreshExpiry)
   );
@@ -105,31 +133,50 @@ const generateTokens = (user, sessionId) => {
 };
 
 /**
- * Verify an access (or id) token and return decoded payload, or throw.
- * Uses the public key for asymmetric algorithms, shared secret for HMAC.
+ * Verify an access token and return decoded payload, or throw.
+ * Also enforces token_type === 'access' to block refresh tokens being used as bearer tokens.
  */
-const verifyAccessToken = (token) =>
-  jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.accessSecret, buildVerifyOptions());
+const verifyAccessToken = (token) => {
+  const decoded = jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.accessSecret, buildVerifyOptions());
+  if (decoded.token_type !== 'access') {
+    throw new jwt.JsonWebTokenError('Invalid token type: expected access token');
+  }
+  return decoded;
+};
 
 /**
  * Verify a refresh token and return decoded payload, or throw.
+ * Also enforces token_type === 'refresh' to block access tokens being used for refresh.
  */
-const verifyRefreshToken = (token) =>
-  jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.refreshSecret, buildVerifyOptions());
+const verifyRefreshToken = (token) => {
+  const decoded = jwt.verify(token, _isAsymmetric ? verifyingKey : jwtConfig.refreshSecret, buildVerifyOptions());
+  if (decoded.token_type !== 'refresh') {
+    throw new jwt.JsonWebTokenError('Invalid token type: expected refresh token');
+  }
+  return decoded;
+};
 
 /**
- * Set accessToken (header), refreshToken, and idToken as HttpOnly Secure cookies.
+ * Parse expiry string (e.g. '15m', '7d', '30d') to seconds.
+ */
+const expiryToSeconds = (expiry) => {
+  const map = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
+  const match = String(expiry).match(/^(\d+)([smhdw])$/);
+  if (!match) return 86400; // default 1 day
+  return parseInt(match[1], 10) * (map[match[2]] || 86400);
+};
+
+/**
+ * Set accessToken, refreshToken, and idToken as HttpOnly Secure cookies.
+ * maxAge is derived from the JWT expiry config so cookies always match token lifetime.
  */
 const setCookiesOnHeader = (res, accessToken, refreshToken, idToken) => {
   const isProd  = env.IS_PROD;
   const base    = { httpOnly: true, secure: isProd, sameSite: 'strict', path: '/' };
 
-  // Access token – short-lived, also returned in body
-  res.cookie('accessToken',  accessToken,  { ...base, maxAge: 24 * 60 * 60 * 1000 });
-  // Refresh token – 7-day HttpOnly cookie
-  res.cookie('refreshToken', refreshToken, { ...base, maxAge: 7 * 24 * 60 * 60 * 1000 });
-  // ID token – 30-day HttpOnly cookie
-  res.cookie('idToken',      idToken,      { ...base, maxAge: 30 * 24 * 60 * 60 * 1000 });
+  res.cookie('accessToken',  accessToken,  { ...base, maxAge: expiryToSeconds(jwtConfig.accessExpiry)  * 1000 });
+  res.cookie('refreshToken', refreshToken, { ...base, maxAge: expiryToSeconds(jwtConfig.refreshExpiry) * 1000 });
+  res.cookie('idToken',      idToken,      { ...base, maxAge: expiryToSeconds(jwtConfig.idExpiry)      * 1000 });
 };
 
 /**
@@ -140,16 +187,6 @@ const clearAuthCookies = (res) => {
   res.clearCookie('accessToken',  base);
   res.clearCookie('refreshToken', base);
   res.clearCookie('idToken',      base);
-};
-
-/**
- * Parse expiry string (e.g. '1d', '7d', '30d') to seconds.
- */
-const expiryToSeconds = (expiry) => {
-  const map = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
-  const match = String(expiry).match(/^(\d+)([smhdw])$/);
-  if (!match) return 86400; // default 1 day
-  return parseInt(match[1], 10) * (map[match[2]] || 86400);
 };
 
 module.exports = {

@@ -14,97 +14,127 @@ const name = (user) => user.firstName || user.username;
 const now  = () => new Date().toISOString();
 
 // ─── Registration & Email Verification ────────────────────────────────────────
+// Sent to the newly registered user — welcome + verify email CTA
 exports.welcome = (user, verifyLink) => ({
-  to: user.email, templateKey: 'USER_CREATED',
-  variables: { name: name(user), verifyLink },
+  to: user.email, templateId: 'USER_WELCOME',
+  data: {
+    userId:    user._id?.toString(),
+    username:  user.username,
+    email:     user.email,
+    verifyLink,
+    timestamp: new Date().toISOString(),
+  },
+});
+// Sent to admin when a new user registers
+exports.adminUserRegistered = (user, req) => ({
+  to: env.ADMIN_EMAIL,
+  templateId: 'ADMIN_USER_REGISTERED',
+  data: {
+    userId:       user._id?.toString(),
+    username:     user.username,
+    email:        user.email,
+    registeredAt: new Date().toISOString(),
+    ipAddress:    req?.ip || req?.socket?.remoteAddress || 'Unknown',
+  },
 });
 exports.emailVerificationLink = (user, verifyLink) => ({
-  to: user.email, templateKey: 'emailVerificationTemplate',
-  variables: { name: name(user), verifyLink, expiryHours: env.EMAIL_VERIFY_EXPIRY_HOURS },
+  to: user.email, templateId: 'emailVerificationTemplate',
+  data: { name: name(user), verifyLink, expiryHours: env.EMAIL_VERIFY_EXPIRY_HOURS },
 });
 exports.emailVerified = (user) => ({
-  to: user.email, templateKey: 'EMAIL_VERIFIED',
-  variables: { name: name(user) },
+  to: user.email, templateId: 'EMAIL_VERIFIED',
+  data: { name: name(user) },
 });
 
 // ─── Password ──────────────────────────────────────────────────────────────────
 exports.passwordResetRequested = (user, resetLink) => ({
-  to: user.email, templateKey: 'PASSWORD_RESET_REQUESTED',
-  variables: { name: name(user), resetLink, expiryHours: RESET_EXPIRY },
+  to: user.email, templateId: 'PASSWORD_RESET_REQUESTED',
+  data: { name: name(user), resetLink, expiryHours: RESET_EXPIRY },
 });
 exports.passwordResetCompleted = (user) => ({
-  to: user.email, templateKey: 'PASSWORD_RESET_COMPLETED',
-  variables: { name: name(user) },
+  to: user.email, templateId: 'PASSWORD_RESET_COMPLETED',
+  data: { name: name(user) },
 });
 exports.passwordChanged = (user) => ({
-  to: user.email, templateKey: 'PASSWORD_CHANGED',
-  variables: { name: name(user) },
+  to: user.email, templateId: 'PASSWORD_CHANGED',
+  data: { name: name(user) },
 });
 
 // ─── Login Security ────────────────────────────────────────────────────────────
 exports.loginFailed = (user, ip) => ({
-  to: user.email, templateKey: 'LOGIN_FAILED',
-  variables: { name: name(user), ip, time: now() },
+  to: user.email, templateId: 'LOGIN_FAILED',
+  data: { name: name(user), ip, time: now() },
 });
 exports.accountLocked = (user) => ({
-  to: user.email, templateKey: 'ACCOUNT_LOCKED',
-  variables: { name: name(user), maxAttempts: MAX_ATTEMPTS },
+  to: user.email, templateId: 'ACCOUNT_LOCKED',
+  data: { name: name(user), maxAttempts: MAX_ATTEMPTS },
 });
 exports.newDeviceLogin = (user, deviceInfo) => ({
-  to: user.email, templateKey: 'NEW_DEVICE_LOGIN',
-  variables: { name: name(user), device: deviceInfo.device, location: deviceInfo.location, ip: deviceInfo.ip, time: now() },
+  to: user.email, templateId: 'NEW_DEVICE_LOGIN',
+  data: { name: name(user), device: deviceInfo.device, location: deviceInfo.location, ip: deviceInfo.ip, time: now() },
 });
 
 // ─── Account Unlock ────────────────────────────────────────────────────────────
 exports.accountUnlockRequest = (user, unlockLink) => ({
-  to: user.email, templateKey: 'ACCOUNT_RECOVERY_REQUESTED',
-  variables: { name: name(user), unlockLink, expiryHours: 1 },
+  to: user.email, templateId: 'ACCOUNT_RECOVERY_REQUESTED',
+  data: { name: name(user), unlockLink, expiryHours: 1 },
 });
 exports.accountUnlockConfirmed = (user) => ({
-  to: user.email, templateKey: 'ACCOUNT_UNLOCKED',
-  variables: { name: name(user) },
+  to: user.email, templateId: 'ACCOUNT_UNLOCKED',
+  data: { name: name(user) },
 });
 
 // ─── Session ───────────────────────────────────────────────────────────────────
 exports.logoutAllDevices = (user) => ({
-  to: user.email, templateKey: 'logoutAllDevicesTemplate',
-  variables: { name: name(user), time: now() },
+  to: user.email, templateId: 'logoutAllDevicesTemplate',
+  data: { name: name(user), time: now() },
 });
 
 // ─── OTP / MFA ─────────────────────────────────────────────────────────────────
 exports.otpEmail = (user, otp, purpose = 'verification') => ({
-  to: user.email, templateKey: 'otpEmailTemplate',
-  variables: { name: name(user), otp, purpose, expiryMinutes: OTP_EXPIRY },
+  to: user.email, templateId: 'otpEmailTemplate',
+  data: { name: name(user), otp, purpose, expiryMinutes: OTP_EXPIRY },
 });
 exports.twoFactorSetup = (user, qrCodeUrl, secret) => ({
-  to: user.email, templateKey: 'twoFactorSetupTemplate',
-  variables: { name: name(user), qrCodeUrl, secret },
+  to: user.email, templateId: 'twoFactorSetupTemplate',
+  data: { name: name(user), qrCodeUrl, secret },
 });
 exports.backupCodes = (user, codes = []) => ({
-  to: user.email, templateKey: 'backupCodesTemplate',
-  variables: { name: name(user), codes },
+  to: user.email, templateId: 'backupCodesTemplate',
+  data: { name: name(user), codes },
 });
 exports.mfaEnabled = (user) => ({
-  to: user.email, templateKey: 'MFA_ENABLED',
-  variables: { name: name(user), time: now() },
+  to: user.email, templateId: 'MFA_ENABLED',
+  data: { name: name(user), time: now() },
 });
 exports.mfaDisabled = (user) => ({
-  to: user.email, templateKey: 'MFA_DISABLED',
-  variables: { name: name(user), time: now() },
+  to: user.email, templateId: 'MFA_DISABLED',
+  data: { name: name(user), time: now() },
 });
 
 // ─── Social Login ──────────────────────────────────────────────────────────────
 exports.socialLoginConnected = (user, provider) => ({
-  to: user.email, templateKey: 'SOCIAL_LOGIN_CONNECTED',
-  variables: { name: name(user), provider, time: now() },
+  to: user.email, templateId: 'SOCIAL_LOGIN_CONNECTED',
+  data: { name: name(user), provider, time: now() },
 });
 exports.socialLoginDisconnected = (user, provider) => ({
-  to: user.email, templateKey: 'SOCIAL_LOGIN_DISCONNECTED',
-  variables: { name: name(user), provider, time: now() },
+  to: user.email, templateId: 'SOCIAL_LOGIN_DISCONNECTED',
+  data: { name: name(user), provider, time: now() },
 });
 
 // ─── Account Lifecycle ─────────────────────────────────────────────────────────
 exports.accountDeleted = (user) => ({
-  to: user.email, templateKey: 'ACCOUNT_TERMINATED',
-  variables: { name: name(user) },
+  to: user.email, templateId: 'ACCOUNT_TERMINATED',
+  data: { name: name(user) },
+});
+
+// ─── Profile Security Changes ─────────────────────────────────────────────────
+// Sent when the user's own profile update changes a security-sensitive field
+exports.phoneChanged = (user) => ({
+  to: user.email, templateId: 'PHONE_CHANGED',
+  data: { name: name(user), newPhone: user.phoneNumber, time: now() },
+});
+exports.usernameChanged = (user, oldUsername) => ({
+  to: user.email, templateId: 'USERNAME_CHANGED',
+  data: { name: name(user), oldUsername, newUsername: user.username, time: now() },
 });

@@ -42,7 +42,44 @@ permissionSchema.pre('validate', function (next) {
 });
 
 permissionSchema.statics.getActivePermissions = function (tenantId) {
-  return this.find({ tenantId, isActive: true, isDeleted: false }).sort({ category: 1, name: 1 });
+  return this.find({ tenantId, isActive: true, isDeleted: false })
+    .populate('created_by updated_by', 'firstName lastName username email')
+    .sort({ category: 1, name: 1 });
+};
+
+/**
+ * Resolve a user reference to the best available display label.
+ * Priority: "First Last" → username → email → id string
+ */
+function resolveUserRef(ref) {
+  if (!ref) return null;
+  if (ref !== null && typeof ref === 'object' && !ref._bsontype) {
+    const fullName = [ref.firstName, ref.lastName].filter(Boolean).join(' ').trim();
+    if (fullName) return fullName;
+    if (ref.username) return ref.username;
+    if (ref.email)    return ref.email;
+    return String(ref._id ?? ref.id);
+  }
+  return String(ref);
+}
+
+permissionSchema.methods.toAPIResponse = function () {
+  return {
+    id:          this._id,
+    name:        this.name,
+    description: this.description,
+    category:    this.category,
+    key:         this.key,
+    resource:    this.resource,
+    action:      this.action,
+    isDefault:   this.isDefault,
+    isActive:    this.isActive,
+    createdAt:   this.createdAt,
+    updatedAt:   this.updatedAt,
+    createdBy:   resolveUserRef(this.created_by),
+    updatedBy:   resolveUserRef(this.updated_by),
+    deletedBy:   resolveUserRef(this.deleted_by),
+  };
 };
 
 module.exports = mongoose.model('Permission', permissionSchema);

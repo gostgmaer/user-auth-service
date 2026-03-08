@@ -8,8 +8,12 @@
 const User      = require('../models/User');
 const LogEntry  = require('../models/LogEntry');
 const activityLog             = require('../services/activityLogService');
+const { revokeAllUserTokens } = require('../services/tokenRevocationService');
+const emailNotifier   = require('../services/emailNotifier');
+const emailPayloads   = require('../email/emailPayloads');
 const AppError  = require('../utils/appError');
 const { sendSuccess, sendPaginated } = require('../utils/responseHelper');
+const { stripId } = require('../utils/helper');
 
 // ─── Account Unlock ────────────────────────────────────────────────────────────
 
@@ -25,6 +29,7 @@ exports.unlockAccount = async (req, res, next) => {
   user.updatedBy = req.user._id;
   await user.resetFailedLogin(); // clears loginAttempts, isLocked, lockUntil
   activityLog.log({ action: 'ACCOUNT_UNLOCKED', userId: user._id, tenantId, performedBy: req.user._id });
+  emailNotifier.send(emailPayloads.accountUnlockConfirmed(user));
   return sendSuccess(res, 'Account unlocked');
 };
 
@@ -41,7 +46,7 @@ exports.listActiveSessions = async (req, res, next) => {
   for (const user of users) {
     (user.activeSessions || []).filter((s) => s.isActive).forEach((s) => {
       sessions.push({
-        ...(s.toObject ? s.toObject() : s),
+        ...stripId(s),
         userId:   user._id,
         email:    user.email,
         username: user.username,
@@ -134,4 +139,33 @@ exports.getAuthAnalytics = async (req, res, next) => {
     activity: { totalLogins, failedLogins, registrations },
     daily:    dailyActivity,
   });
+};
+
+// ─── Internal Service Endpoint ────────────────────────────────────────────────
+
+// PATCH /api/internal/users/:userId/force-status
+// Called by sibling microservices to sync user state + revoke active tokens.
+// Protected by SERVICE_API_KEY (x-api-key header) — not by JWT.
+exports.forceStatusSync = async (req, res, next) => {
+  const { userId }                                        = req.params;
+  const tenantId                                         = req.tenantId;
+  const { isActive, status, isDeleted, invalidateSessions } = req.body;
+
+  const user = await User.findOne({ _id: userId, tenantId });
+  if (!user) return next(AppError.notFound('User not found'));
+
+  if (isActive  !== undefined) user.isActive  = isActive;
+  if (status    !== undefined) user.status    = status;
+  if (isDeleted !== undefined) user.isDeleted = isDeleted;
+  await user.save();
+
+  const shouldRevoke =
+    isActive === false ||
+    isDeleted === true ||
+    invalidateSessions === true ||
+    ['banned', 'deleted', 'suspended', 'inactive'].includes(status);
+
+  if (shouldRevoke) await revokeAllUserTokens(user, 'admin_force_status');
+
+  return sendSuccess(res, 'User status synced');
 };

@@ -8,6 +8,8 @@
     "start:cluster": "pm2 start pm2.config.js --env production",
     "start:dev": "nodemon server.js",
     "dev": "nodemon server.js",
+    "debug": "node --inspect=0.0.0.0:9229 server.js",
+    "debug:dev": "nodemon --inspect=0.0.0.0:9229 server.js",
     "stop": "pm2 stop user-auth-service",
     "restart": "pm2 restart user-auth-service",
     "reload": "pm2 reload user-auth-service",
