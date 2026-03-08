@@ -10,9 +10,9 @@ const schema = Joi.object({
   JWT_ACCESS_SECRET:      Joi.string().min(32).required(),
   JWT_REFRESH_SECRET:     Joi.string().min(32).required(),
   JWT_ID_SECRET:          Joi.string().min(32).required(),
-  JWT_ACCESS_EXPIRY:      Joi.string().default('15m'),
-  JWT_REFRESH_EXPIRY:     Joi.string().default('7d'),
-  JWT_ID_EXPIRY:          Joi.string().default('30d'),
+  JWT_ACCESS_EXPIRY:      Joi.string().pattern(/^\d+[smhdw]$/).default('15m'),
+  JWT_REFRESH_EXPIRY:     Joi.string().pattern(/^\d+[smhdw]$/).default('7d'),
+  JWT_ID_EXPIRY:          Joi.string().pattern(/^\d+[smhdw]$/).default('30d'),
   JWT_ISSUER:             Joi.string().required(),
   JWT_AUDIENCE:           Joi.string().required(),
   BCRYPT_ROUNDS:          Joi.number().min(10).max(14).default(12),
@@ -42,8 +42,7 @@ const schema = Joi.object({
   ENABLE_OTP_VERIFICATION: Joi.string().valid('true', 'false').default('false'),
   // ─── Email sender identity ───────────────────────────────────────────────
   EMAIL_FROM_ADDRESS:     Joi.string().email().optional().allow(''),
-  EMAIL_FROM_NAME:        Joi.string().optional().allow(''),
-  // ─── JWT optional / asymmetric ───────────────────────────────────────────
+  EMAIL_FROM_NAME:        Joi.string().optional().allow(''),  ADMIN_EMAIL:            Joi.string().email().optional().allow(''),  SERVICE_API_KEY:        Joi.string().optional().allow(''),  // ─── JWT optional / asymmetric ───────────────────────────────────────────
   JWT_ALGORITHM:          Joi.string().valid('HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512').default('HS256'),
   JWT_PRIVATE_KEY_PATH:   Joi.string().optional().allow(''),
   JWT_PUBLIC_KEY_PATH:    Joi.string().optional().allow(''),

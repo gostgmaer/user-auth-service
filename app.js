@@ -19,10 +19,14 @@ const { globalApiLimiter } = require('./src/middleware/rateLimit');
 const { metricsMiddleware } = require('./src/utils/metrics');
 const logger           = require('./src/utils/logger');
 
+// Eager-register all Mongoose models before any route handler runs
+require('./src/models/index');
+
 const healthRoutes      = require('./src/routes/healthRoutes');
 const authRoutes        = require('./src/routes/authRoutes');
 const socialAuthRoutes  = require('./src/routes/socialAuthRoutes');
 const adminRoutes       = require('./src/routes/adminRoutes');
+const internalRoutes    = require('./src/routes/internalRoutes');
 
 const app = express();
 
@@ -76,12 +80,37 @@ app.use(cookieParser());
 app.use(hpp({ whitelist: ['sort', 'fields', 'ids'] }));
 
 // ─── Sanitization ─────────────────────────────────────────────────────────────
-app.use(mongoSanitize({ replaceWith: '_' }));
+// express-mongo-sanitize@2.2.0 tries to assign req.query which is a read-only
+// getter in newer Node/router versions. Sanitize only body and params manually.
+app.use((req, _res, next) => {
+  if (req.body)   req.body   = mongoSanitize.sanitize(req.body,   { replaceWith: '_' });
+  if (req.params) req.params = mongoSanitize.sanitize(req.params, { replaceWith: '_' });
+  next();
+});
 app.use(sanitizeInput);
 
 // ─── Request ID ───────────────────────────────────────────────────────────────
 app.use((req, _res, next) => {
   req.requestId = req.headers['x-request-id'] || require('crypto').randomUUID();
+  next();
+});
+
+// ─── Response envelope ────────────────────────────────────────────────────────
+// Injects: timestamp, requestId, statusCode, status into every JSON response.
+// Also serialises _id → id (string), strips __v, strips null values, sets headers.
+app.use((req, res, next) => {
+  res.setHeader('X-Request-ID', req.requestId);
+  const _json = res.json.bind(res);
+  res.json = function (body) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (body !== null && body !== undefined && typeof body === 'object' && !Array.isArray(body)) {
+      body.timestamp  = new Date().toISOString();
+      body.requestId  = req.requestId;
+      body.statusCode = res.statusCode;
+      body.status     = res.statusCode < 400 ? 'success' : 'error';
+    }
+    return _json(_cleanResponse(body));
+  };
   next();
 });
 
@@ -114,6 +143,7 @@ app.use('/api', tenantMiddleware);
 app.use('/api/auth',         authRoutes);
 app.use('/api/auth/social',  socialAuthRoutes);
 app.use('/api/admin',        adminRoutes);
+app.use('/api/internal',     internalRoutes);
 
 // ─── 404 handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -128,3 +158,26 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 module.exports = app;
+
+// ─── Response transform ───────────────────────────────────────────────────────
+// Serialises Mongoose docs (_id → id, drops __v) and strips null values.
+function _cleanResponse(val) {
+  if (val === null || val === undefined) return undefined;
+  if (typeof val !== 'object') return val;
+  if (val instanceof Date) return val;
+  if (Buffer.isBuffer(val)) return val;
+  if (Array.isArray(val)) return val.map(_cleanResponse).filter(v => v !== undefined);
+  const src = typeof val.toJSON === 'function' ? val.toJSON() : val;
+  if (typeof src !== 'object' || src === null) return src;
+  const out = {};
+  for (const key of Object.keys(src)) {
+    if (key === '__v' || key === '_id' || key === 'id' ||
+        key === 'isDeleted' || key === 'deletedAt' ||
+        key === 'created_by' || key === 'updated_by' || key === 'deleted_by') continue;
+    const v = _cleanResponse(src[key]);
+    if (v !== undefined) out[key] = v;
+  }
+  const rawId = src.id !== undefined ? src.id : src._id;
+  if (rawId !== undefined) out.id = String(rawId);
+  return out;
+}

@@ -55,10 +55,11 @@ const env = {
   ENABLE_OTP_VERIFICATION: e.ENABLE_OTP_VERIFICATION === 'true',
 
   // ─── Email ────────────────────────────────────────────────────────────────
-  EMAIL_SERVICE_URL: e.EMAIL_SERVICE_URL,
+  EMAIL_SERVICE_URL:  e.EMAIL_SERVICE_URL,
   EMAIL_FROM_ADDRESS: e.EMAIL_FROM_ADDRESS || '',
-  EMAIL_FROM_NAME:    e.EMAIL_FROM_NAME || '',
-
+  EMAIL_FROM_NAME:    e.EMAIL_FROM_NAME    || '',
+  ADMIN_EMAIL:        e.ADMIN_EMAIL        || '',
+  SERVICE_API_KEY:    e.SERVICE_API_KEY    || '',
   // ─── CORS ─────────────────────────────────────────────────────────────────
   CORS_ORIGIN: e.CORS_ORIGIN,
 

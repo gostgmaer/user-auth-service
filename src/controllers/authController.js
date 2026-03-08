@@ -16,12 +16,13 @@ const emailNotifier   = require('../services/emailNotifier');
 const emailPayloads   = require('../email/emailPayloads');
 const AppError        = require('../utils/appError');
 const { sendSuccess, sendCreated, sendError } = require('../utils/responseHelper');
-const { sanitizeUser } = require('../utils/helper');
+const { sanitizeUser, stripId } = require('../utils/helper');
 const { hashPassword, verifyPassword, hashToken, generateSecureToken, checkPasswordStrength }
                       = require('../utils/security');
 const { verifyAccessToken } = require('../services/tokenService');
 const jwtConfig       = require('../config/jwt');
 const env             = require('../config/env');
+const logger = require('../utils/logger');
 
 const EMAIL_VERIFY_EXPIRY_HOURS   = env.EMAIL_VERIFY_EXPIRY_HOURS;
 const PASSWORD_RESET_EXPIRY_HOURS = env.PASSWORD_RESET_EXPIRY_HOURS;
@@ -49,7 +50,17 @@ const buildSession = (deviceInfo) => ({
 // ─── Register ────────────────────────────────────────────────────────────────
 
 exports.register = async (req, res, next) => {
-  const { email, password, username, firstName, lastName, ...rest } = req.body;
+  // Explicitly exclude server-controlled fields so a caller cannot self-assign
+  // status, override tenantId, inject internal fields, etc.
+  // `role` is allowed through as a role *name* string and resolved below.
+  const {
+    email, password, username, firstName, lastName,
+    role: roleName,
+    status: _status, isActive: _isActive, isDeleted: _isDeleted,
+    tenantId: _tid, hash_password: _hp, emailVerificationToken: _evt,
+    emailVerificationTokenExpiry: _evte, loginSecurity: _ls,
+    sessions: _sessions, ...rest
+  } = req.body;
   const tenantId = req.tenantId;
   const deviceInfo = DeviceDetector.detectDevice(req);
 
@@ -65,8 +76,14 @@ exports.register = async (req, res, next) => {
   const existingUser  = await User.findOne({ tenantId, username: usernameToUse });
   if (existingUser) return next(AppError.conflict(`Username "${usernameToUse}" is already taken`));
 
-  // Resolve the tenant's default 'user' role
-  const defaultRole = await Role.findOne({ tenantId, name: 'user', isActive: true, isDeleted: false });
+  // Resolve role: use the requested role name if provided and found, otherwise fall back to the tenant's default role
+  const defaultRole = await Role.findOne({ tenantId, isDefault: true });
+  let resolvedRole = defaultRole;
+  if (roleName && typeof roleName === 'string') {
+    const requestedRole = await Role.findOne({ tenantId, name: roleName.trim(), isActive: true, isDeleted: false });
+    if (requestedRole) resolvedRole = requestedRole;
+    // If the requested role doesn't exist, silently fall back to the default
+  }
 
   // Create user
   const hash_password = await hashPassword(password);
@@ -82,19 +99,22 @@ exports.register = async (req, res, next) => {
     lastName:  lastName  || null,
     emailVerificationToken:       verifyHash,
     emailVerificationTokenExpiry: new Date(Date.now() + EMAIL_VERIFY_EXPIRY_HOURS * 60 * 60 * 1000),
-    role:     defaultRole?._id || null,
+    role:     resolvedRole?._id || null,
     status: 'pending',
     isActive: true,
     ...rest,
   });
 
-  // Log event + fire-and-forget welcome email
+  // Log event + fire-and-forget emails: welcome to user, notification to admin
   activityLog.logRegistration(user, req);
   const verifyLink = `${env.FRONTEND_URL}/verify-email?token=${verifyToken}&tenantId=${tenantId}`;
   emailNotifier.send(emailPayloads.welcome(user, verifyLink));
+  if (env.ADMIN_EMAIL) {
+    emailNotifier.send(emailPayloads.adminUserRegistered(user, req));
+  }
 
   return sendCreated(res, 'Registration successful. Please verify your email.', {
-    user: { id: user._id, email: user.email, username: user.username, status: user.status },
+    user: { id: user.id, email: user.email, username: user.username, status: user.status },
   });
 };
 
@@ -156,9 +176,8 @@ exports.login = async (req, res, next) => {
     };
     await user.save();
     return sendSuccess(res, 'MFA verification required', {
-      mfaRequired: true,
+      twoFactorRequired: true,
       mfaToken,
-      methods: otpService.getAvailableMethods(user),
     });
   }
 
@@ -203,7 +222,9 @@ exports.login = async (req, res, next) => {
 
   return sendSuccess(res, 'Login successful', {
     accessToken,
-    user: sanitizeUser(user),
+    accessExpiresIn: expiryToSeconds(jwtConfig.accessExpiry),
+    refreshToken,
+    refreshExpiresIn: expiryToSeconds(jwtConfig.refreshExpiry),
   });
 };
 
@@ -247,7 +268,12 @@ exports.verifyMfaLogin = async (req, res, next) => {
   setCookiesOnHeader(res, accessToken, refreshToken, idToken);
   activityLog.logLogin(user, req, session.sessionId, 'totp');
 
-  return sendSuccess(res, 'Login successful', { accessToken, user: sanitizeUser(user) });
+  return sendSuccess(res, 'Login successful', {
+    accessToken,
+    accessExpiresIn: expiryToSeconds(jwtConfig.accessExpiry),
+    refreshToken,
+    refreshExpiresIn: expiryToSeconds(jwtConfig.refreshExpiry),
+  });
 };
 
 // ─── Logout ───────────────────────────────────────────────────────────────────
@@ -331,7 +357,12 @@ exports.refreshToken = async (req, res, next) => {
   await user.save();
 
   setCookiesOnHeader(res, accessToken, newRefreshToken, idToken);
-  return sendSuccess(res, 'Token refreshed', { accessToken });
+  return sendSuccess(res, 'Token refreshed', {
+    accessToken,
+    accessExpiresIn:  expiryToSeconds(jwtConfig.accessExpiry),
+    refreshToken:     newRefreshToken,
+    refreshExpiresIn: expiryToSeconds(jwtConfig.refreshExpiry),
+  });
 };
 
 // ─── Verify Token (used by other microservices) ───────────────────────────────
@@ -351,21 +382,22 @@ exports.verifyToken = async (req, res, next) => {
     const decoded = verifyAccessToken(token);
     const tenantId = req.tenantId || decoded.tenantId;
 
-    // Revocation check
-    const revoked = await isTokenRevoked(decoded.jti, tenantId);
-    if (revoked) return res.status(401).json({ valid: false, error: 'TOKEN_REVOKED' });
-
-    // Cross-tenant check
+    // Cross-tenant check — pure in-memory, reject before any DB call
     if (req.tenantId && decoded.tenantId !== req.tenantId) {
       return res.status(403).json({ valid: false, error: 'TENANT_MISMATCH' });
     }
 
-    // Fetch live user with populated role and permissions
-    const user = await User.findOne(
-      { _id: decoded.sub, tenantId, isDeleted: false },
-      'firstName lastName email status isActive emailVerified isVerified role activeSessions'
-    ).populate({ path: 'role', select: 'name permissions', populate: { path: 'permissions', select: 'key' } });
+    // Run revocation check and user fetch in parallel — they are independent
+    const [revoked, user] = await Promise.all([
+      isTokenRevoked(decoded.jti, tenantId),
+      User.findOne(
+        { _id: decoded.sub, tenantId, isDeleted: false },
+        'status isActive activeSessions',
+        { lean: true }
+      ),
+    ]);
 
+    if (revoked) return res.status(401).json({ valid: false, error: 'TOKEN_REVOKED' });
     if (!user) return res.status(401).json({ valid: false, error: 'USER_NOT_FOUND' });
     if (!user.isActive || user.status !== 'active') {
       return res.status(401).json({ valid: false, error: 'ACCOUNT_INACTIVE' });
@@ -377,24 +409,11 @@ exports.verifyToken = async (req, res, next) => {
     );
     if (!sessionActive) return res.status(401).json({ valid: false, error: 'SESSION_INVALID' });
 
-    const permissions = (user.role?.permissions || []).map((p) => p.key).filter(Boolean);
-
     return res.status(200).json({
-      valid: true,
-      user: {
-        id:           decoded.sub,
-        tenantId,
-        email:        user.email,
-        firstName:    user.firstName,
-        lastName:     user.lastName,
-        role:         user.role?.name || decoded.role || null,
-        permissions,
-        status:       user.status,
-        isActive:     user.isActive,
-        emailVerified: user.emailVerified,
-        isVerified:   user.isVerified,
-        sessionId:    decoded.sessionId,
-      },
+      valid:     true,
+      id:        decoded.sub,
+      role:      decoded.role,
+      sessionId: decoded.sessionId,
     });
   } catch (err) {
     const code = err.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
@@ -452,6 +471,7 @@ exports.resendVerification = async (req, res, next) => {
 // ─── Password: Forgot ─────────────────────────────────────────────────────────
 
 exports.forgotPassword = async (req, res, next) => {
+  logger.info('Password reset requested', { email: req.body.email, tenantId: req.tenantId });
   const { email } = req.body;
   const tenantId  = req.tenantId;
 
@@ -534,8 +554,14 @@ exports.changePassword = async (req, res, next) => {
 
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
+// Fields that must never leave the service in any profile response
+const PROFILE_EXCLUDE = '-hash_password -emailVerificationToken -emailVerificationTokenExpiry -passwordReset -unlockToken -loginSecurity -refreshTokens -currentOTP -twoFactorAuth -activeSessions -loginHistory -securityEvents -knownDevices -__v';
+
 exports.getProfile = async (req, res, next) => {
-  const user = await User.findOne({ _id: req.user._id, tenantId: req.tenantId });
+  const user = await User.findOne(
+    { _id: req.user._id, tenantId: req.tenantId },
+    PROFILE_EXCLUDE
+  ).populate('role', '_id name');
   if (!user) return next(AppError.notFound('User not found'));
   return sendSuccess(res, 'Profile retrieved', sanitizeUser(user));
 };
@@ -559,11 +585,17 @@ exports.updateProfile = async (req, res, next) => {
     if (taken) return next(AppError.conflict('Username is already taken'));
   }
 
+  // Snapshot sensitive fields before update so we can detect what changed
+  const before = await User.findOne(
+    { _id: req.user._id, tenantId: req.tenantId },
+    'username phoneNumber'
+  ).lean();
+
   const user = await User.findOneAndUpdate(
     { _id: req.user._id, tenantId: req.tenantId },
     { $set: { ...updates, updatedBy: req.user._id } },
-    { new: true, runValidators: true }
-  );
+    { new: true, runValidators: true, projection: PROFILE_EXCLUDE }
+  ).populate('role', '_id name');
   if (!user) return next(AppError.notFound('User not found'));
 
   // Fire-and-forget activity log
@@ -577,6 +609,14 @@ exports.updateProfile = async (req, res, next) => {
     metadata:    { updatedFields: Object.keys(updates) },
   }));
 
+  // Notify user of security-relevant field changes (fire-and-forget)
+  if (updates.phoneNumber !== undefined && updates.phoneNumber !== before?.phoneNumber) {
+    emailNotifier.send(emailPayloads.phoneChanged(user));
+  }
+  if (updates.username !== undefined && updates.username !== before?.username) {
+    emailNotifier.send(emailPayloads.usernameChanged(user, before?.username));
+  }
+
   return sendSuccess(res, 'Profile updated', sanitizeUser(user));
 };
 
@@ -584,7 +624,7 @@ exports.updateProfile = async (req, res, next) => {
 
 exports.getSessions = async (req, res, next) => {
   const user = await User.findOne({ _id: req.user._id, tenantId: req.tenantId });
-  const sessions = (user?.activeSessions || []).filter((s) => s.isActive);
+  const sessions = (user?.activeSessions || []).filter((s) => s.isActive).map(stripId);
   return sendSuccess(res, 'Active sessions', sessions);
 };
 
@@ -611,7 +651,7 @@ exports.revokeAllSessions = async (req, res, next) => {
 
 exports.getDevices = async (req, res, next) => {
   const user = await User.findOne({ _id: req.user._id, tenantId: req.tenantId });
-  const devices = (user?.knownDevices || []).filter((d) => d.isActive);
+  const devices = (user?.knownDevices || []).filter((d) => d.isActive).map(stripId);
   return sendSuccess(res, 'Known devices', devices);
 };
 
@@ -785,9 +825,15 @@ exports.deleteOwnAccount = async (req, res, next) => {
 
 exports.exportAccountData = async (req, res, next) => {
   const user = await User.findOne({ _id: req.user._id, tenantId: req.tenantId })
+    .populate('role', '_id name')
     .select('-hash_password -passwordReset -emailVerificationToken -emailVerificationTokenExpiry -twoFactorAuth -currentOTP');
   if (!user) return next(AppError.notFound('User not found'));
-  return sendSuccess(res, 'Account data export', { user });
+  const data = user.toObject();
+  // Reduce populated role to just name string for consistency
+  if (data.role && typeof data.role === 'object' && data.role.name !== undefined) {
+    data.role = data.role.name;
+  }
+  return sendSuccess(res, 'Account data export', { user: data });
 };
 
 // ─── Self-Service Account Unlock ─────────────────────────────────────────────────────
@@ -873,7 +919,7 @@ exports.toggleDeviceTrust = async (req, res, next) => {
 
   device.isTrusted = trusted;
   await user.save();
-  return sendSuccess(res, `Device ${trusted ? 'trusted' : 'untrusted'}`, { device });
+  return sendSuccess(res, `Device ${trusted ? 'trusted' : 'untrusted'}`, { device: stripId(device) });
 };
 
 // ─── Security Events Log (self) ────────────────────────────────────────────────────────────
@@ -889,7 +935,8 @@ exports.getSecurityEvents = async (req, res, next) => {
 
   const events = [...(user.securityEvents || [])]
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-    .slice(skip, skip + limit);
+    .slice(skip, skip + limit)
+    .map(stripId);
 
   return sendSuccess(res, 'Security events', {
     events,

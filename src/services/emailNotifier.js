@@ -27,10 +27,23 @@ const _onSuccess = (template) => {
   recordEmail(template, 'sent');
 };
 
-const _onFailure = (template, errMsg) => {
+const _onFailure = (template, err) => {
   CB.failures++;
   recordEmail(template, 'failed');
-  logger.warn('EmailNotifier: delivery failure', { template, error: errMsg, failures: CB.failures });
+
+  // Extract meaningful detail from axios errors
+  const status   = err.response?.status;
+  const resBody  = err.response?.data;
+  const errMsg   = err.message || err.code || String(err);
+
+  logger.warn('EmailNotifier: delivery failure', {
+    template,
+    error:      errMsg,
+    statusCode: status,
+    response:   resBody,
+    code:       err.code,       // e.g. ECONNREFUSED, ETIMEDOUT
+    failures:   CB.failures,
+  });
 
   if (CB.failures >= CB.threshold) {
     CB.state       = 'OPEN';
@@ -51,8 +64,8 @@ const send = (payload) => {
   // Fast-fail if circuit is open and cooldown has not elapsed
   if (CB.state === 'OPEN') {
     if (Date.now() < CB.nextRetryAt) {
-      recordEmail(payload?.templateKey || 'unknown', 'circuit_open');
-      logger.debug('EmailNotifier: circuit OPEN — suppressing email', { template: payload?.templateKey });
+      recordEmail(payload?.templateId || 'unknown', 'circuit_open');
+      logger.debug('EmailNotifier: circuit OPEN — suppressing email', { template: payload?.templateId });
       return;
     }
     // Cooldown elapsed — probe with one request (half-open)
@@ -60,13 +73,13 @@ const send = (payload) => {
     logger.info('EmailNotifier: circuit HALF_OPEN — probing email service');
   }
 
-  const template = payload?.templateKey || 'unknown';
+  const template = payload?.templateId || 'unknown';
 
   // Intentionally not awaited
   axios
     .post(`${EMAIL_SERVICE_URL}/send-email`, payload, { timeout: 5000 })
     .then(() => _onSuccess(template))
-    .catch((err) => _onFailure(template, err.message));
+    .catch((err) => _onFailure(template, err));
 };
 
 /**
