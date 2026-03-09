@@ -44,8 +44,7 @@ router.post('/login/mfa',
 );
 
 // Token operations
-router.post('/token/refresh',  refreshLimiter, asyncHandler(ctrl.refreshToken));
-router.get('/token/verify',    verifyLimiter, asyncHandler(ctrl.verifyToken));
+router.post("/token/refresh", refreshLimiter, asyncHandler(ctrl.refreshToken));
 router.post('/token/verify',   verifyLimiter, asyncHandler(ctrl.verifyToken));
 
 // Email verification
