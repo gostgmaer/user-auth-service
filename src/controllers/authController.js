@@ -409,12 +409,15 @@ exports.verifyToken = async (req, res, next) => {
     );
     if (!sessionActive) return res.status(401).json({ valid: false, error: 'SESSION_INVALID' });
 
-    return res.status(200).json({
-      valid:     true,
-      id:        decoded.sub,
-      role:      decoded.role,
-      sessionId: decoded.sessionId,
-    });
+    return res
+			.status(200)
+			.json({
+				valid: true,
+				id: decoded.sub,
+				role: decoded.role,
+				tenantId: decoded.tenantId,
+				sessionId: decoded.sessionId,
+			});
   } catch (err) {
     const code = err.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
     return res.status(401).json({ valid: false, error: code });
